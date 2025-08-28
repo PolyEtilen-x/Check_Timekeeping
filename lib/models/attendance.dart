@@ -5,7 +5,7 @@ class Attendance {
   final String id;
   final String uid;
   final String name;
-  final String role;
+  final int  role;
   final String status;
   final DateTime? serverAt;
   final DateTime? clientAt;
@@ -46,7 +46,9 @@ class Attendance {
       id: doc.id,
       uid: (d['uid'] ?? '') as String,
       name: (d['name'] ?? '') as String,
-      role: (d['role'] ?? '') as String,
+      role: (d['role'] is int)
+          ? d['role'] as int
+          : int.tryParse('${d['role']}') ?? 1,
       status: (d['status'] ?? '') as String,
       serverAt: parseServerAt(),
       clientAt: parseClientAt(),

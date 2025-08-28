@@ -88,20 +88,29 @@ class _HomeManagerState extends State<HomeManager> {
         padding: const EdgeInsets.all(20),
         child: SafeArea(
           child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.center, 
             children: [
+              Center(
+                child: Image.asset('assets/logo.png', width: 150, height: 150),
+              ),
+              const SizedBox(height: 50),
+
               Text(
                 _loading ? 'Xin chào...' : 'Xin chào, ${_name ?? ''}',
+                textAlign: TextAlign.center,
                 style: const TextStyle(
                   fontSize: 20,
                   fontWeight: FontWeight.w600,
                   color: Color(0xFF233986),
                 ),
               ),
+
               const SizedBox(height: 30),
+
+              // Các nút
               _buildButton(
                 text: 'CHẤM CÔNG',
-                icon: Icons.face_retouching_natural, 
+                icon: Icons.face_retouching_natural,
                 onTap: () {
                   Navigator.push(
                     context,

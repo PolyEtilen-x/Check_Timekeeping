@@ -1,3 +1,4 @@
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../../models/attendance.dart';
@@ -22,17 +23,13 @@ class _TimeKeepingListPageState extends State<TimeKeepingListPage> {
   DateTime get _startOfDay => _selectedDay;
   DateTime get _endOfDay => _selectedDay.add(const Duration(days: 1));
 
+  // ===== Firestore stream (để sau này bật lại) =====
   Stream<List<Attendance>> _streamByDay() {
-    // Query theo khoảng thời gian trong ngày trên field 'timestamp'
     return FirebaseFirestore.instance
         .collection('timekeeping')
         .where('timestamp', isGreaterThanOrEqualTo: Timestamp.fromDate(_startOfDay))
         .where('timestamp', isLessThan: Timestamp.fromDate(_endOfDay))
-        .orderBy('timestamp', descending: true) // sắp xếp mới → cũ
-        .withConverter<Map<String, dynamic>>(
-          fromFirestore: (snap, _) => snap.data() ?? {},
-          toFirestore: (data, _) => data,
-        )
+        .orderBy('timestamp', descending: true)
         .snapshots()
         .map((qs) => qs.docs
             .map((d) => Attendance.fromDoc(d as DocumentSnapshot<Map<String, dynamic>>))
@@ -63,9 +60,26 @@ class _TimeKeepingListPageState extends State<TimeKeepingListPage> {
 
   String _roleText(int r) => r == 2 ? 'Quản lý' : 'Nhân viên';
 
+  // Tạo giờ checkout giả định từ id + ngày để ổn định giữa các lần build
+  DateTime? _mockCheckoutOf(Attendance a) {
+    // ~80% có checkout
+    final seed = '${a.id}-${_selectedDay.year}-${_selectedDay.month}-${_selectedDay.day}'.hashCode;
+    final rnd = Random(seed);
+    final didCheckout = rnd.nextInt(100) >= 20;
+    if (!didCheckout) return null;
+
+    // Làm 7–9 giờ kể từ giờ check-in (dùng serverAt/clientAt làm check-in)
+    final checkIn = a.serverAt ?? a.clientAt ?? DateTime(_selectedDay.year, _selectedDay.month, _selectedDay.day, 8, 0);
+    final mins = 7 * 60 + rnd.nextInt(120); // 420..539 phút
+    return checkIn.add(Duration(minutes: mins));
+  }
+
   Widget _item(Attendance a) {
-    final time = _fmtTime(a.serverAt ?? a.clientAt);
-    final badgeColor = a.status == 'success' ? const Color(0xFF21D07A) : const Color(0xFFE53935);
+    final checkInTime = _fmtTime(a.serverAt ?? a.clientAt);
+    final checkoutAt = _mockCheckoutOf(a);
+    final badgeColor = a.status.toLowerCase() == 'success'
+        ? const Color(0xFF21D07A)
+        : const Color(0xFFE53935);
 
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 8),
@@ -74,62 +88,160 @@ class _TimeKeepingListPageState extends State<TimeKeepingListPage> {
         borderRadius: BorderRadius.circular(14),
         boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 3)],
       ),
-      child: ListTile(
-        leading: ClipRRect(
-          borderRadius: BorderRadius.circular(8),
-          child: (a.faceImageUrl != null && a.faceImageUrl!.isNotEmpty)
-              ? Image.network(a.faceImageUrl!, width: 46, height: 46, fit: BoxFit.cover)
-              : Container(
-                  width: 46, height: 46,
-                  color: const Color(0xFFEAEAEA),
-                  child: const Icon(Icons.person, color: Color(0xFF233986)),
-                ),
-        ),
-        title: Text(
-          a.name.isEmpty ? a.uid : a.name,
-          style: const TextStyle(
-            color: Color(0xFF233986),
-            fontWeight: FontWeight.w800,
-          ),
-        ),
-        subtitle: Text(
-          '${_roleText(a.role as int)} • ${a.by.toUpperCase()}',
-          style: const TextStyle(color: Colors.black54),
-        ),
-        trailing: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              time,
-              style: const TextStyle(
-                color: Color(0xFF233986),
-                fontWeight: FontWeight.w800,
+            // Avatar
+            ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: (a.faceImageUrl != null && a.faceImageUrl!.isNotEmpty)
+                  ? Image.network(a.faceImageUrl!,
+                      width: 46, height: 46, fit: BoxFit.cover)
+                  : Container(
+                      width: 46,
+                      height: 46,
+                      color: const Color(0xFFEAEAEA),
+                      child: const Icon(Icons.person, color: Color(0xFF233986)),
+                    ),
+            ),
+            const SizedBox(width: 12),
+
+            // Thông tin chính
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    a.name.isEmpty ? a.uid : a.name,
+                    style: const TextStyle(
+                      color: Color(0xFF233986),
+                      fontWeight: FontWeight.w800,
+                      fontSize: 16,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    '${_roleText(a.role)} • ${a.by.toUpperCase()}',
+                    style: const TextStyle(color: Colors.black54, fontSize: 13),
+                  ),
+                ],
               ),
             ),
-            const SizedBox(height: 6),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              decoration: BoxDecoration(
-                color: badgeColor.withOpacity(.12),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Text(
-                a.status.toUpperCase(),
-                style: TextStyle(
-                  color: badgeColor,
-                  fontWeight: FontWeight.w800,
-                  fontSize: 11,
-                  letterSpacing: .4,
+
+            // Check-in / Check-out / Badge
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.login, size: 16, color: Color(0xFF233986)),
+                    const SizedBox(width: 4),
+                    Text(
+                      checkInTime,
+                      style: const TextStyle(
+                        color: Color(0xFF233986),
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ],
                 ),
-              ),
+                const SizedBox(height: 6),
+                if (checkoutAt != null)
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.logout, size: 16, color: Color(0xFF233986)),
+                      const SizedBox(width: 4),
+                      Text(
+                        _fmtTime(checkoutAt),
+                        style: const TextStyle(
+                          color: Color(0xFF233986),
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ],
+                  )
+                else
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFE8A317).withOpacity(.12),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Text(
+                      'CHƯA CHECK-OUT',
+                      style: TextStyle(
+                        color: Color(0xFFE8A317),
+                        fontWeight: FontWeight.w800,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                const SizedBox(height: 6),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: badgeColor.withOpacity(.12),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    a.status.toUpperCase(),
+                    style: TextStyle(
+                      color: badgeColor,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 11,
+                    ),
+                  ),
+                ),
+              ],
             ),
           ],
         ),
-        onTap: () {
-          // TODO: nếu cần xem chi tiết bản ghi
-        },
       ),
     );
+  }
+
+
+  Stream<List<Attendance>> _mockStreamByDay() {
+    final day = _selectedDay;
+    final seed = '${day.year}-${day.month}-${day.day}'.hashCode;
+    final rnd = Random(seed);
+
+    const names = [
+      'Nguyễn Hồng Tồn','Trần Vũ','Lê Nguyễn','Phạm Trung','Hoàng Thu',
+      'Đỗ Minh','Từ Hải','Đinh Lan','Bùi Tiến','Phan Ngọc',
+    ];
+
+    final List<Attendance> mock = [];
+    for (int i = 0; i < 10; i++) {
+      // Check-in khoảng 08:00–09:29
+      final baseIn = DateTime(day.year, day.month, day.day, 8, 0);
+      final inOffset = rnd.nextInt(90); 
+      final checkIn = baseIn.add(Duration(minutes: inOffset));
+
+      mock.add(
+        Attendance(
+          id: 'mock-${day.year}${day.month}${day.day}-$i',
+          uid: 'u${(i + 1).toString().padLeft(3, '0')}',
+          name: names[i % names.length],
+          role: (i % 5 == 0) ? 2 : 1, 
+          status: rnd.nextInt(100) < 90 ? 'success' : 'failed', 
+          serverAt: checkIn,      
+          clientAt: checkIn,   
+          by: rnd.nextBool() ? 'camera' : 'manual',
+          faceImageUrl: 'https://i.pravatar.cc/150?img=${(i % 70) + 1}',
+        ),
+      );
+    }
+
+    // sắp xếp mới → cũ theo check-in
+    mock.sort((a, b) => (b.serverAt ?? b.clientAt)!.compareTo((a.serverAt ?? a.clientAt)!));
+
+    // giả lập fetch 1 lần
+    return Stream<List<Attendance>>.value(mock);
   }
 
   @override
@@ -171,35 +283,36 @@ class _TimeKeepingListPageState extends State<TimeKeepingListPage> {
                       ),
                     ),
                     const SizedBox(width: 12),
-                    // Nút chọn ngày
-                    
+                    // (giữ trống slot nút chọn ngày trong Row theo yêu cầu “còn lại k đổi”)
                   ],
                 ),
                 const SizedBox(height: 12),
+
+                // Nút chọn ngày (giữ nguyên)
                 OutlinedButton.icon(
-                      onPressed: _pickDate,
-                      style: OutlinedButton.styleFrom(
-                        backgroundColor: Colors.white,
-                        side: BorderSide.none,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                      ),
-                      icon: const Icon(Icons.calendar_today, size: 18, color: Color(0xFF233986)),
-                      label: Text(
-                        dayLabel,
-                        style: const TextStyle(
-                          color: Color(0xFF233986),
-                          fontWeight: FontWeight.w800,
-                        ),
-                      ),
+                  onPressed: _pickDate,
+                  style: OutlinedButton.styleFrom(
+                    backgroundColor: Colors.white,
+                    side: BorderSide.none,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  ),
+                  icon: const Icon(Icons.calendar_today, size: 18, color: Color(0xFF233986)),
+                  label: Text(
+                    dayLabel,
+                    style: const TextStyle(
+                      color: Color(0xFF233986),
+                      fontWeight: FontWeight.w800,
                     ),
+                  ),
+                ),
 
                 const SizedBox(height: 12),
-                
-                // List
+
+                // List (đang dùng MOCK). Khi xong mock → đổi stream: _streamByDay()
                 Expanded(
                   child: StreamBuilder<List<Attendance>>(
-                    stream: _streamByDay(),
+                    stream: _mockStreamByDay(),
                     builder: (context, snap) {
                       if (snap.connectionState == ConnectionState.waiting) {
                         return const Center(child: CircularProgressIndicator());

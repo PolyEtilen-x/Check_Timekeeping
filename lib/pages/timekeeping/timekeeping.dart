@@ -360,22 +360,15 @@ class _StatusChip extends StatelessWidget {
     ].join(' · ');
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      margin: const EdgeInsets.only(top: 8, left: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(
-        color: Colors.black.withOpacity(0.55),
-        borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: Colors.white24),
+        color: Colors.black.withOpacity(0.6),
+        borderRadius: BorderRadius.circular(20),
       ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Icon(Icons.verified_user, color: Colors.white70, size: 16),
-          const SizedBox(width: 6),
-          Text(
-            extra.isEmpty ? status : '$status · $extra',
-            style: const TextStyle(color: Colors.white, fontSize: 12),
-          ),
-        ],
+      child: Text(
+        extra.isEmpty ? status : '$status · $extra',
+        style: const TextStyle(color: Colors.white, fontSize: 12),
       ),
     );
   }
@@ -402,51 +395,65 @@ class _BottomPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     final hasRec = name != null && role != null && timeIn != null;
 
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Colors.black.withOpacity(0.45),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.white24),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (hasRec)
-            Text(
-              '$name ($role) · ${timeIn!.toLocal().toIso8601String().replaceFirst("T", " ").split(".").first}',
-              style: const TextStyle(
-                  color: Colors.white, fontSize: 16, fontWeight: FontWeight.w600),
+    return Align(
+      alignment: Alignment.bottomCenter,
+      child: Container(
+        margin: const EdgeInsets.all(12),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.black.withOpacity(0.55),
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            hasRec
+                ? Text(
+                    '$name ($role)\n${timeIn!.toLocal().toIso8601String().replaceFirst("T", " ").split(".").first}',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  )
+                : const Text(
+                    'Chưa nhận diện',
+                    style: TextStyle(color: Colors.white70, fontSize: 14),
+                  ),
+            const SizedBox(height: 12),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                ElevatedButton(
+                  onPressed: onStart,
+                  style: ElevatedButton.styleFrom(
+                    shape: const CircleBorder(),
+                    padding: const EdgeInsets.all(14),
+                  ),
+                  child: const Icon(Icons.play_arrow),
+                ),
+                OutlinedButton(
+                  onPressed: onStop,
+                  style: OutlinedButton.styleFrom(
+                    shape: const CircleBorder(),
+                    padding: const EdgeInsets.all(14),
+                  ),
+                  child: const Icon(Icons.stop),
+                ),
+                ElevatedButton(
+                  onPressed: onRestart,
+                  style: ElevatedButton.styleFrom(
+                    shape: const CircleBorder(),
+                    padding: const EdgeInsets.all(14),
+                    backgroundColor: Colors.blueGrey,
+                  ),
+                  child: const Icon(Icons.restart_alt),
+                ),
+              ],
             )
-          else
-            const Text(
-              'Chưa nhận diện',
-              style: TextStyle(color: Colors.white70, fontSize: 14),
-            ),
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              ElevatedButton.icon(
-                onPressed: onStart,
-                icon: const Icon(Icons.play_arrow),
-                label: const Text('Bắt đầu'),
-              ),
-              const SizedBox(width: 8),
-              OutlinedButton.icon(
-                onPressed: onStop,
-                icon: const Icon(Icons.stop),
-                label: const Text('Dừng'),
-              ),
-              const SizedBox(width: 8),
-              TextButton.icon(
-                onPressed: onRestart,
-                icon: const Icon(Icons.restart_alt),
-                label: const Text('Khởi động lại'),
-                style: TextButton.styleFrom(foregroundColor: Colors.white),
-              ),
-            ],
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

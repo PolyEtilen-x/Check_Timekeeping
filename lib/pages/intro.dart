@@ -1,6 +1,6 @@
-import 'package:checktimekeeping/pages/register.dart';
 import 'package:flutter/material.dart';
 import 'login.dart';
+import 'package:checktimekeeping/pages/register.dart';
 
 class IntroPage extends StatelessWidget {
   const IntroPage({super.key});
@@ -21,59 +21,75 @@ class IntroPage extends StatelessWidget {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Image.asset(
-              'assets/logo.png',
-              width: 300,
-              height: 300,
-            ),
-            const SizedBox(height: 40),
+            Image.asset('assets/logo.png', width: 200, height: 200),
+            const SizedBox(height: 50),
 
-            ElevatedButton(
-              onPressed: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (context) => const RegisterPage()),
-                );
-              },
-              style: ElevatedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 50),
-                backgroundColor: Colors.white,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(20),
-                ),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
               ),
-              child: const Text(
-                'ĐĂNG KÝ',
-                style: TextStyle(
-                  color: Color(0xFF233986),
-                  fontWeight: FontWeight.bold,
-                  letterSpacing: 1,
-                ),
-              ),
-            ),
-            const SizedBox(height: 20),
+              child: Column(
+                children: [
+                
+                  const SizedBox(height: 16),
 
-            ElevatedButton(
-              onPressed: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (context) => const LoginPage()),
-                );
-              },
-              style: ElevatedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 50),
-                backgroundColor: Colors.white,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(20),
-                ),
-              ),
-              child: const Text(
-                'ĐĂNG NHẬP',
-                style: TextStyle(
-                  color: Color(0xFF233986),
-                  fontWeight: FontWeight.bold,
-                  letterSpacing: 1,
-                ),
+                  // Nút Đăng nhập
+                  SizedBox(
+                    width: double.infinity,
+                    height: 50, // Chiều cao bằng nút trên
+                    child: ElevatedButton(
+                      onPressed: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(builder: (_) => const LoginPage()),
+                        );
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      child: const Text(
+                        'ĐĂNG NHẬP',
+                        style: TextStyle(
+                          color: Color(0xFF233986),
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 1,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  SizedBox(
+                    width: double.infinity,
+                    height: 50,
+                    child: ElevatedButton(
+                      onPressed: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(builder: (_) => const RegisterPage()),
+                        );
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      child: const Text(
+                        'ĐĂNG KÝ',
+                        style: TextStyle(
+                          color: Color(0xFF233986),
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 1,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
           ],

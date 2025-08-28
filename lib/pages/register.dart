@@ -47,7 +47,7 @@ class _RegisterPageState extends State<RegisterPage>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    FaceRuntime.instance.init();
+    FaceRuntime.instance.init(); // chỉ load model, không đọc Firestore
   }
 
   @override
@@ -122,7 +122,7 @@ class _RegisterPageState extends State<RegisterPage>
     _faceSnapshot = null;
     setState(() => _isSampling = true);
 
-    if (!_streaming) {
+    if (!_streaming || !_controller!.value.isStreamingImages) {
       await _controller!.startImageStream(_onImage);
       setState(() => _streaming = true);
     }
@@ -141,7 +141,7 @@ class _RegisterPageState extends State<RegisterPage>
 
   Future<void> _onImage(CameraImage img) async {
     final now = DateTime.now();
-    if (now.difference(_lastAt).inMilliseconds < 250) return;
+    if (now.difference(_lastAt).inMilliseconds < 250) return; // debounce
     _lastAt = now;
     if (_busy || !_isSampling) return;
     _busy = true;
@@ -151,22 +151,20 @@ class _RegisterPageState extends State<RegisterPage>
       if (emb != null && emb.isNotEmpty) {
         _samples.add(emb);
         _got = _samples.length;
+        if (kDebugMode) debugPrint('[REGISTER] sample: $_got/$_targetSamples');
         if (mounted) setState(() {});
         if (_got >= _targetSamples) {
           await _stopSampling();
-          try {
-            _faceSnapshot = await _controller?.takePicture();
-          } catch (_) {}
+          try { _faceSnapshot = await _controller?.takePicture(); } catch (_) {}
           final mean = FaceRuntime.instance.meanEmbedding(_samples);
-          if (mean.isNotEmpty) {
-            _faceOK = true;
-            _snack('Đã thu mẫu khuôn mặt thành công ($_got ảnh).');
-          } else {
-            _faceOK = false;
-            _snack('Không tạo được embedding. Vui lòng thử lại.');
-          }
+          _faceOK = mean.isNotEmpty;
+          _snack(_faceOK
+              ? 'Đã thu mẫu khuôn mặt thành công ($_got ảnh).'
+              : 'Không tạo được embedding. Vui lòng thử lại.');
           if (mounted) setState(() {});
         }
+      } else {
+        if (kDebugMode) debugPrint('[REGISTER] no-face / bad-quality frame');
       }
     } catch (e, st) {
       if (kDebugMode) {
@@ -186,14 +184,17 @@ class _RegisterPageState extends State<RegisterPage>
     }
     setState(() => _isLoading = true);
     try {
-      final cred = await FirebaseAuth.instance
-          .createUserWithEmailAndPassword(
-              email: _emailCtr.text.trim(),
-              password: _passwordCtr.text);
+      final cred = await FirebaseAuth.instance.createUserWithEmailAndPassword(
+        email: _emailCtr.text.trim(),
+        password: _passwordCtr.text,
+      );
       final uid = cred.user!.uid;
+
+      // 1) Tính embedding trung bình & lưu vào users/{uid}.embedding
       final mean = FaceRuntime.instance.meanEmbedding(_samples);
       await FaceRuntime.instance.saveEmbedding(uid, mean);
-      await FaceRuntime.instance.refreshIndex();
+
+      // 2) Upload ảnh đại diện lên Cloudinary -> lưu link vào users/{uid}
       String? faceUrl;
       String? facePublicId;
       if (_faceSnapshot != null) {
@@ -204,6 +205,7 @@ class _RegisterPageState extends State<RegisterPage>
           facePublicId = map['publicId'];
         } catch (_) {}
       }
+
       final roleName = _role == 2 ? 'manager' : 'employee';
       final userData = {
         'uid': uid,
@@ -220,6 +222,9 @@ class _RegisterPageState extends State<RegisterPage>
           .collection('users')
           .doc(uid)
           .set(userData, SetOptions(merge: true));
+
+      // 3) (tuỳ chọn) nạp lại index sau khi đã có user
+      await FaceRuntime.instance.refreshIndex();
 
       if (!mounted) return;
       if (_role == 1) {
@@ -290,6 +295,7 @@ class _RegisterPageState extends State<RegisterPage>
                   const SizedBox(height: 20),
                   TextFormField(
                     controller: _nameCtr,
+                    style: const TextStyle(color: Color(0xFF233986), fontWeight: FontWeight.bold),
                     decoration: _input('Họ và tên'),
                     validator: (v) =>
                         (v == null || v.trim().isEmpty) ? 'Nhập họ tên' : null,
@@ -298,6 +304,7 @@ class _RegisterPageState extends State<RegisterPage>
                   TextFormField(
                     controller: _emailCtr,
                     keyboardType: TextInputType.emailAddress,
+                    style: const TextStyle(color: Color(0xFF233986), fontWeight: FontWeight.bold),
                     decoration: _input('Email'),
                     validator: (v) {
                       if (v == null || v.trim().isEmpty) return 'Nhập email';
@@ -309,6 +316,7 @@ class _RegisterPageState extends State<RegisterPage>
                   TextFormField(
                     controller: _passwordCtr,
                     obscureText: true,
+                    style: const TextStyle(color: Color(0xFF233986), fontWeight: FontWeight.bold),
                     decoration: _input('Mật khẩu (>= 6 ký tự)'),
                     validator: (v) =>
                         (v != null && v.length >= 6) ? null : 'Mật khẩu tối thiểu 6 ký tự',
@@ -317,6 +325,7 @@ class _RegisterPageState extends State<RegisterPage>
                   TextFormField(
                     controller: _confirmCtr,
                     obscureText: true,
+                    style: const TextStyle(color: Color(0xFF233986), fontWeight: FontWeight.bold),
                     decoration: _input('Xác nhận mật khẩu'),
                     validator: (v) =>
                         (v == _passwordCtr.text) ? null : 'Mật khẩu không khớp',
@@ -374,17 +383,26 @@ class _RegisterPageState extends State<RegisterPage>
                   Row(
                     children: [
                       Expanded(
-                          child: OutlinedButton.icon(
-                              icon: const Icon(Icons.video_call),
-                              onPressed: _cameraReady ? null : _initCamera,
-                              label: const Text('Bật camera'))),
+                        child: OutlinedButton.icon(
+                          icon: const Icon(Icons.video_call),
+                          onPressed: _cameraReady ? null : _initCamera,
+                          label: const Text('Bật camera'),
+                        ),
+                      ),
                       const SizedBox(width: 12),
                       Expanded(
-                          child: OutlinedButton.icon(
-                              icon: const Icon(Icons.face_retouching_natural),
-                              onPressed:
-                                  (!_isSampling && !_faceOK) ? _startSampling : null,
-                              label: Text('Quét khuôn mặt ($_targetSamples ảnh)'))),
+                        child: OutlinedButton.icon(
+                          icon: const Icon(Icons.face_retouching_natural),
+                          onPressed: (!_isSampling && !_faceOK) ? () async {
+                            if (!_cameraReady) {
+                              await _initCamera();
+                              if (!_cameraReady) return;
+                            }
+                            await _startSampling();
+                          } : null,
+                          label: Text('Quét khuôn mặt ($_targetSamples ảnh)'),
+                        ),
+                      ),
                     ],
                   ),
                   const SizedBox(height: 8),
@@ -425,7 +443,20 @@ class _RegisterPageState extends State<RegisterPage>
                                   color: Color(0xFF233986),
                                   fontWeight: FontWeight.bold,
                                   letterSpacing: 1))),
+                  ),
+                  
+                  const SizedBox(height: 12),
+                  TextButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: const Text(
+                      'Đã có tài khoản? Đăng nhập',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                        decoration: TextDecoration.underline,
+                      ),
                     ),
+                  ),
                 ],
               ),
             ),
@@ -438,7 +469,15 @@ class _RegisterPageState extends State<RegisterPage>
   InputDecoration _input(String label) => InputDecoration(
         labelText: label,
         border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+        labelStyle: const TextStyle(color: Color(0xFF233986)),
         filled: true,
         fillColor: Colors.white,
+      );
+
+  InputDecoration _dropdownDecoration() => InputDecoration(
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+        filled: true,
+        fillColor: Colors.white,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
       );
 }

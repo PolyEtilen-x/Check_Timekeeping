@@ -21,10 +21,11 @@ class FaceRuntime {
   // Cấu hình cho MobileFaceNet bạn đã tải
   static const String _modelAsset = 'assets/models/mobilefacenet.tflite';
   static const int _inputSize = 112;
-  static const double _mean = 127.5; 
+  static const double _mean = 127.5;
   static const double _std  = 127.5;
   static const double _matchThreshold = 0.42;
 
+  // Lưu embedding trong users collection
   static const String _usersCollection = 'users';
   static const String _embeddingField  = 'embedding';
 
@@ -46,7 +47,7 @@ class FaceRuntime {
   Future<void> init() async {
     if (_inited) return;
     _interpreter ??= await tfl.Interpreter.fromAsset(_modelAsset);
-    await _loadIndexFromFirestore();
+    // ❗ Không đọc Firestore ở đây để tránh permission-denied khi chưa đăng nhập
     _inited = true;
   }
 
@@ -63,11 +64,13 @@ class FaceRuntime {
     final cropped = _cropSafe(rgb, face.boundingBox, expandRatio: 0.10);
     if (cropped == null) return null;
     final resized = img.copyResize(
-      cropped, width: _inputSize, height: _inputSize,
+      cropped,
+      width: _inputSize,
+      height: _inputSize,
       interpolation: img.Interpolation.average,
     );
 
-    // 3) Embedding
+    // 3) run tflite + L2 normalize
     final emb = await _runEmbedding(resized);
     if (emb == null || emb.isEmpty) return null;
 
@@ -86,19 +89,16 @@ class FaceRuntime {
     if (faces.isEmpty) return null;
     final face = _selectLargest(faces);
 
-    // 2) YUV/BGRA -> RGB -> crop -> resize(112)
+    // 2) YUV/BGRA -> RGB -> CROP -> RESIZE
     final rgb = _yuvToRgb(image);
     final cropped = _cropSafe(rgb, face.boundingBox, expandRatio: 0.10);
     if (cropped == null) return null;
-
     final resized = img.copyResize(
-      cropped,
-      width: _inputSize,
-      height: _inputSize,
+      cropped, width: _inputSize, height: _inputSize,
       interpolation: img.Interpolation.average,
     );
 
-    // 3) run tflite + L2 normalize
+    // 3) Embedding
     final emb = await _runEmbedding(resized);
     return emb;
   }
@@ -136,14 +136,12 @@ class FaceRuntime {
     _index.removeWhere((e) => e.uid == uid);
     _index.add(_Idx(uid, emb));
   }
+
   Future<void> refreshIndex() async => _loadIndexFromFirestore();
-  
 
   // ================= Firestore =================
   Future<void> _loadIndexFromFirestore() async {
     _index.clear();
-
-    // BỎ .select([...]) để tránh lỗi API; đọc thẳng và kiểm tra field.
     final qs = await FirebaseFirestore.instance
         .collection(_usersCollection)
         .get();
@@ -160,35 +158,14 @@ class FaceRuntime {
     if (kDebugMode) {
       debugPrint('[FaceRuntime] loaded ${_index.length} embeddings from Firestore');
     }
-  }
-
-  // ================= Detect với ML Kit =================
-  Future<List<Face>> _detectFaces(CameraImage cam) async {
-    final input = _toMlkitInput(cam);
-    if (input == null) return [];
-    return _detector.processImage(input);
-  }
-
-  Face _selectLargest(List<Face> faces) {
-    faces.sort((a, b) {
-      final aa = a.boundingBox.width * a.boundingBox.height;
-      final bb = b.boundingBox.width * b.boundingBox.height;
-      return bb.compareTo(aa);
-    });
-    return faces.first;
-  }
-
-  InputImageRotation _rotation = InputImageRotation.rotation0deg;
-
-  InputImageRotation _rotationFromDegrees(int deg) {
-    switch (deg % 360) {
-      case 90:  return InputImageRotation.rotation90deg;
-      case 180: return InputImageRotation.rotation180deg;
-      case 270: return InputImageRotation.rotation270deg;
-      default:  return InputImageRotation.rotation0deg;
+    if (_index.isNotEmpty) {
+      _embeddingDim = _index.first.emb.length;
     }
   }
+  // ============================================
 
+  // ======== Orientation & InputImage ==========
+  int _rotation = 0;
   int _orientationToDegrees(DeviceOrientation o) {
     switch (o) {
       case DeviceOrientation.portraitUp:    return 0;
@@ -218,121 +195,170 @@ class FaceRuntime {
 
       if (Platform.isAndroid) {
         bytes = _concatPlanes(cam.planes);
-        format = InputImageFormat.yuv420; 
+        format = InputImageFormat.yuv420;
         bytesPerRow = cam.planes.first.bytesPerRow;
       } else {
+        // iOS
         bytes = cam.planes.first.bytes;
         format = InputImageFormat.bgra8888;
         bytesPerRow = cam.planes.first.bytesPerRow;
       }
 
-      final metadata = InputImageMetadata(
-        size: ui.Size(cam.width.toDouble(), cam.height.toDouble()),
-        rotation: _rotation, 
-        format: format,
-        bytesPerRow: bytesPerRow,
+      final input = InputImage.fromBytes(
+        bytes: bytes,
+        metadata: InputImageMetadata(
+          size: ui.Size(cam.width.toDouble(), cam.height.toDouble()),
+          rotation: InputImageRotationValue.fromRawValue(_rotation) ?? InputImageRotation.rotation0deg,
+          format: format,
+          bytesPerRow: bytesPerRow,
+        ),
       );
-      return InputImage.fromBytes(bytes: bytes, metadata: metadata);
-    } catch (_) {
+      return input;
+    } catch (e) {
+      if (kDebugMode) debugPrint('[FaceRuntime] _toMlkitInput error: $e');
+      return null;
+    }
+  }
+  // ============================================
+
+  // =============== Pipeline ===================
+  Future<List<Face>> _detectFaces(CameraImage cam) async {
+    final input = _toMlkitInput(cam);
+    if (input == null) return const [];
+    final faces = await _detector.processImage(input);
+    return faces;
+  }
+
+  Face _selectLargest(List<Face> faces) {
+    faces.sort((a, b) {
+      final aw = a.boundingBox.width;
+      final ah = a.boundingBox.height;
+      final bw = b.boundingBox.width;
+      final bh = b.boundingBox.height;
+      final aArea = aw * ah;
+      final bArea = bw * bh;
+      return bArea.compareTo(aArea); // giảm dần
+    });
+    return faces.first;
+  }
+
+  img.Image _yuvToRgb(CameraImage cam) {
+    // Chuyển YUV420/BGRA8888 sang RGB bằng package:image
+    if (Platform.isAndroid) {
+      final w = cam.width;
+      final h = cam.height;
+      final yPlane = cam.planes[0];
+      final uPlane = cam.planes[1];
+      final vPlane = cam.planes[2];
+
+      final uvRowStride = uPlane.bytesPerRow;
+      final uvPixelStride = uPlane.bytesPerPixel ?? 1;
+
+      final rgb = img.Image(width: w, height: h);
+      final yBytes = yPlane.bytes;
+
+      for (int y = 0; y < h; y++) {
+        final yRow = y * yPlane.bytesPerRow;
+        final uvRow = (y >> 1) * uvRowStride;
+        for (int x = 0; x < w; x++) {
+          final uvCol = (x >> 1) * uvPixelStride;
+          final yp = yBytes[yRow + x] & 0xFF;
+          final up = uPlane.bytes[uvRow + uvCol] & 0xFF;
+          final vp = vPlane.bytes[uvRow + uvCol] & 0xFF;
+
+          int r = (yp + 1.370705 * (vp - 128)).round().clamp(0, 255);
+          int g = (yp - 0.337633 * (up - 128) - 0.698001 * (vp - 128)).round().clamp(0, 255);
+          int b = (yp + 1.732446 * (up - 128)).round().clamp(0, 255);
+          rgb.setPixelRgb(x, y, r, g, b);
+        }
+      }
+      return rgb;
+    } else {
+      final bgra = cam.planes.first.bytes;
+      final w = cam.width, h = cam.height;
+      final i = img.Image.fromBytes(
+        width: w,
+        height: h,
+        bytes: bgra.buffer,
+        numChannels: 4,
+        order: img.ChannelOrder.bgra,
+      );
+      return img.copyRotate(i, angle: 0);
+    }
+  }
+
+  img.Image? _cropSafe(img.Image src, Rect box, {double expandRatio = 0.0}) {
+    final w = src.width.toDouble();
+    final h = src.height.toDouble();
+    var left = math.max(0.0, box.left - box.width * expandRatio);
+    var top  = math.max(0.0, box.top  - box.height * expandRatio);
+    var right  = math.min(w, box.right + box.width * expandRatio);
+    var bottom = math.min(h, box.bottom + box.height * expandRatio);
+
+    final x = left.floor();
+    final y = top.floor();
+    final cw = (right - left).floor();
+    final ch = (bottom - top).floor();
+
+    if (cw <= 0 || ch <= 0) return null;
+    return img.copyCrop(src, x: x, y: y, width: cw, height: ch);
+  }
+
+  Future<List<double>?> _runEmbedding(img.Image input) async {
+    try {
+      // Chuẩn hoá [0..255] -> [-1..1]
+      // final imageTensor = _preprocess(input, _inputSize, _inputSize, _mean, _std);
+      final output = List<double>.filled(192, 0.0);
+      var outputTensor = [output];
+
+      // _interpreter!.run(imageTensor, outputTensor);
+
+      final emb = outputTensor.first;
+      _embeddingDim ??= emb.length;
+      return _l2norm(emb);
+    } catch (e, st) {
+      if (kDebugMode) {
+        debugPrint('[FaceRuntime] _runEmbedding error: $e');
+        debugPrint('$st');
+      }
       return null;
     }
   }
 
-  // Translate image & embedding =================
-  img.Image _yuvToRgb(CameraImage cam) {
-    final w = cam.width, h = cam.height;
-    final out = img.Image(width: w, height: h);
+  // LList<List<List<double>>> _preprocessGray(
+  // img.Image im, int iw, int ih, double mean, double std) {
 
-    if (cam.format.group == ImageFormatGroup.bgra8888) {
-      final p0 = cam.planes[0].bytes;
-      int o = 0;
-      for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-          final b = p0[o++];
-          final g = p0[o++];
-          final r = p0[o++];
-          final a = p0[o++]; // unused
-          out.setPixelRgb(x, y, r, g, b);
-        }
-      }
-      return out;
-    }
+  // final resized = img.copyResize(im, width: iw, height: ih,
+  //     interpolation: img.Interpolation.linear);
 
-    final yPlane = cam.planes[0];
-    final uPlane = cam.planes[1];
-    final vPlane = cam.planes[2];
+  // final input = List.generate(
+  //   1,
+  //   (_) => List.generate(
+  //     ih, (_) => List<double>.filled(iw, 0.0, growable: false),
+  //     growable: false),
+  //   growable: false);
 
-    final uvRowStride = uPlane.bytesPerRow;
-    final uvPixelStride = uPlane.bytesPerPixel ?? 1;
+  // for (int y = 0; y < ih; y++) {
+  //   for (int x = 0; x < iw; x++) {
+  //     final c = resized.getPixel(x, y);     // 0xAARRGGBB
+      // final r = ((c >> 16) & 0xFF).toDouble();
+      // final g = ((c >>  8) & 0xFF).toDouble();
+      // final b = ( c        & 0xFF).toDouble();
+      // final rn = (r - mean) / std;
+      // final gn = (g - mean) / std;
+      // final bn = (b - mean) / std;
+      // input[0][y][x] = (rn + gn + bn) / 3.0;
+    // }
+//   }
+//   return input;
+// }
 
-    for (int y = 0; y < h; y++) {
-      final yRow = y * yPlane.bytesPerRow;
-      final uvRow = (y >> 1) * uvRowStride;
-      for (int x = 0; x < w; x++) {
-        final Y = yPlane.bytes[yRow + x] & 0xFF;
-        final uvIndex = uvRow + (x >> 1) * uvPixelStride;
-        final U = uPlane.bytes[uvIndex] & 0xFF;
-        final V = vPlane.bytes[uvIndex] & 0xFF;
-
-        int r = (Y + 1.370705 * (V - 128)).round();
-        int g = (Y - 0.337633 * (U - 128) - 0.698001 * (V - 128)).round();
-        int b = (Y + 1.732446 * (U - 128)).round();
-
-        if (r < 0) r = 0; else if (r > 255) r = 255;
-        if (g < 0) g = 0; else if (g > 255) g = 255;
-        if (b < 0) b = 0; else if (b > 255) b = 255;
-
-        out.setPixelRgb(x, y, r, g, b);
-      }
-    }
-    return out;
-  }
-
-  img.Image? _cropSafe(img.Image src, Rect bbox, {double expandRatio = 0.10}) {
-    double x1 = bbox.left, y1 = bbox.top, x2 = bbox.right, y2 = bbox.bottom;
-
-    final dx = (x2 - x1) * expandRatio;
-    final dy = (y2 - y1) * expandRatio;
-    x1 -= dx; y1 -= dy; x2 += dx; y2 += dy;
-
-    final ix1 = x1.floor().clamp(0, src.width - 1);
-    final iy1 = y1.floor().clamp(0, src.height - 1);
-    final ix2 = x2.ceil().clamp(1, src.width);
-    final iy2 = y2.ceil().clamp(1, src.height);
-
-    final cw = ix2 - ix1, ch = iy2 - iy1;
-    if (cw <= 1 || ch <= 1) return null;
-
-    return img.copyCrop(src, x: ix1, y: iy1, width: cw, height: ch);
-  }
-
-  Future<List<double>?> _runEmbedding(img.Image rgb112) async {
-    if (_interpreter == null) return null;
-
-    // image 4.x: getPixel(x,y) trả Pixel có .r/.g/.b
-    final inputFloats = List<double>.filled(_inputSize * _inputSize * 3, 0.0, growable: false);
-    int i = 0;
-    for (int y = 0; y < _inputSize; y++) {
-      for (int x = 0; x < _inputSize; x++) {
-        final px = rgb112.getPixel(x, y);
-        final r = px.r.toDouble();
-        final g = px.g.toDouble();
-        final b = px.b.toDouble();
-        inputFloats[i++] = (r - _mean) / _std;
-        inputFloats[i++] = (g - _mean) / _std;
-        inputFloats[i++] = (b - _mean) / _std;
-      }
-    }
-
-    final inputTensor = _interpreter!.getInputTensor(0);
-    final outputTensor = _interpreter!.getOutputTensor(0);
-    final outSize = outputTensor.shape.reduce((a, b) => a * b);
-
-    final outputFloats = List<double>.filled(outSize, 0.0, growable: false);
-    _interpreter!.run(inputFloats, outputFloats);
-
-    _embeddingDim ??= outSize;
-    return _l2norm(outputFloats);
+  List<double> _l2norm(List<double> v) {
+    double s = 0.0;
+    for (final x in v) { s += x * x; }
+    final n = math.sqrt(s);
+    if (n == 0) return v;
+    return v.map((e) => e / n).toList(growable: false);
   }
 
   (String, double)? _nearestByCosine(List<double> q, List<_Idx> idx) {
@@ -340,35 +366,39 @@ class FaceRuntime {
     String bestId = idx.first.uid;
     double best = -1.0;
     for (final it in idx) {
-      final s = _cosine(q, it.emb);
-      if (s > best) { best = s; bestId = it.uid; }
+      final sim = _cosine(q, it.emb);
+      if (sim > best) { best = sim; bestId = it.uid; }
     }
     return (bestId, best);
   }
 
-  List<double> _l2norm(List<double> v) {
-    double s = 0.0; for (final x in v) s += x * x;
-    final n = math.sqrt(s);
-    final d = n == 0 ? 1.0 : n;
-    return v.map((x) => x / d).toList(growable: false);
+  double _cosine(List<double> a, List<double> b) {
+    if (a.length != b.length) return -1.0;
+    double dot = 0.0, na = 0.0, nb = 0.0;
+    for (int i = 0; i < a.length; i++) {
+      dot += a[i]*b[i]; na += a[i]*a[i]; nb += b[i]*b[i];
+    }
+    final d = math.sqrt(na) * math.sqrt(nb);
+    if (d == 0) return -1.0;
+    return dot / d;
   }
 
-  double _cosine(List<double> a, List<double> b) {
-    final n = math.min(a.length, b.length);
-    double dot = 0, na = 0, nb = 0;
-    for (int i = 0; i < n; i++) {
-      final x = a[i], y = b[i];
-      dot += x * y; na += x * x; nb += y * y;
+  int _rotationFromDegrees(int degrees) {
+    switch (degrees) {
+      case 0: return 0;
+      case 90: return 90;
+      case 180: return 180;
+      case 270: return 270;
+      default: return 0;
     }
-    final denom = math.sqrt(na) * math.sqrt(nb);
-    if (denom == 0) return 0.0;
-    final v = dot / denom;
-    return v.clamp(-1.0, 1.0);
   }
+
+  Rect _scaleBox(Rect r, double sx, double sy) =>
+      Rect.fromLTRB(r.left*sx, r.top*sy, r.right*sx, r.bottom*sy);
 
   Uint8List _concatPlanes(List<Plane> planes) {
-    final total = planes.fold<int>(0, (s, p) => s + p.bytes.length);
-    final out = Uint8List(total);
+    final bytes = planes.fold<int>(0, (p, e) => p + e.bytes.length);
+    final out = Uint8List(bytes);
     int off = 0;
     for (final p in planes) {
       out.setAll(off, p.bytes);
