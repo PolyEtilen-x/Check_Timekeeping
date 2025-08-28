@@ -24,36 +24,25 @@ class Attendance {
     this.faceImageUrl,
   });
 
-  factory Attendance.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) {
-    final d = doc.data() ?? <String, dynamic>{};
-
-    DateTime? parseServerAt() {
-      final v = d['timestamp'];
-      if (v is Timestamp) return v.toDate().toLocal();
-      if (v is String) return DateTime.tryParse(v)?.toLocal();
-      return null;
-    }
-
-    DateTime? parseClientAt() {
-      final v = d['clientAt'];
+  factory Attendance.fromDoc(DocumentSnapshot doc) {
+    final data = doc.data() as Map<String, dynamic>? ?? {};
+    DateTime? parseTs(dynamic v) {
       if (v == null) return null;
-      if (v is Timestamp) return v.toDate().toLocal();
-      if (v is String) return DateTime.tryParse(v)?.toLocal();
+      if (v is Timestamp) return v.toDate();
+      if (v is String) return DateTime.tryParse(v);
       return null;
     }
 
     return Attendance(
       id: doc.id,
-      uid: (d['uid'] ?? '') as String,
-      name: (d['name'] ?? '') as String,
-      role: (d['role'] is int)
-          ? d['role'] as int
-          : int.tryParse('${d['role']}') ?? 1,
-      status: (d['status'] ?? '') as String,
-      serverAt: parseServerAt(),
-      clientAt: parseClientAt(),
-      by: (d['by'] ?? '') as String,
-      faceImageUrl: d['faceImageUrl'] as String?,
+      uid: data['uid'] ?? '',
+      name: data['name'] ?? '',
+      role: (data['role'] ?? 1) is int ? (data['role'] ?? 1) : 1,
+      status: data['status'] ?? 'present',
+      serverAt: parseTs(data['serverAt']),
+      clientAt: parseTs(data['clientAt']),
+      by: data['by'] ?? 'system',
+      faceImageUrl: data['faceImageUrl'] as String?,
     );
   }
 

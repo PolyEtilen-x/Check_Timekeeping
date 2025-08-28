@@ -1,17 +1,13 @@
-import 'dart:async';
 import 'dart:io';
 
-import 'package:camera/camera.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
-import 'package:permission_handler/permission_handler.dart';
+import 'package:image_picker/image_picker.dart';
 
 import '../pages/home_employee/home.dart';
 import '../pages/home_manager/home.dart';
 import '../services/cloudinary_service.dart';
-import '../services/face_runtime.dart';
 
 class RegisterPage extends StatefulWidget {
   const RegisterPage({super.key});
@@ -20,192 +16,93 @@ class RegisterPage extends StatefulWidget {
   State<RegisterPage> createState() => _RegisterPageState();
 }
 
-class _RegisterPageState extends State<RegisterPage>
-    with WidgetsBindingObserver {
+class _RegisterPageState extends State<RegisterPage> {
   final _nameCtr = TextEditingController();
   final _emailCtr = TextEditingController();
   final _passwordCtr = TextEditingController();
   final _confirmCtr = TextEditingController();
-
   final _formKey = GlobalKey<FormState>();
+
+  int _role = 1; // 1: employee, 2: manager
   bool _isLoading = false;
-  int _role = 1; // 1 employee, 2 manager
 
-  CameraController? _controller;
-  bool _cameraReady = false;
-  bool _streaming = false;
-  bool _isSampling = false;
-  int _targetSamples = 20;
-  int _got = 0;
-  bool _faceOK = false;
-  final List<List<double>> _samples = [];
-  XFile? _faceSnapshot;
-  bool _busy = false;
-  DateTime _lastAt = DateTime.fromMillisecondsSinceEpoch(0);
-
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addObserver(this);
-    FaceRuntime.instance.init(); // chỉ load model, không đọc Firestore
-  }
+  XFile? _pickedFace; // ảnh đã chọn/chụp
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
     _nameCtr.dispose();
     _emailCtr.dispose();
     _passwordCtr.dispose();
     _confirmCtr.dispose();
-    _disposeCamera();
     super.dispose();
   }
 
-  Future<void> _initCamera() async {
-    if (_cameraReady) return;
-    final camStatus = await Permission.camera.request();
-    if (!camStatus.isGranted) {
-      _snack('Cần quyền Camera để đăng ký khuôn mặt.');
-      return;
-    }
+  void _snack(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  Future<void> _pickFromGallery() async {
     try {
-      final cams = await availableCameras();
-      final front = cams.firstWhere(
-        (c) => c.lensDirection == CameraLensDirection.front,
-        orElse: () => cams.first,
-      );
-      final controller = CameraController(
-        front,
-        ResolutionPreset.medium,
-        enableAudio: false,
-        imageFormatGroup: ImageFormatGroup.yuv420,
-      );
-      await controller.initialize();
-
-      FaceRuntime.instance.updateRotation(
-        controller.description,
-        controller.value.deviceOrientation,
-      );
-      controller.addListener(() {
-        final ori = controller.value.deviceOrientation;
-        FaceRuntime.instance.updateRotation(controller.description, ori);
-      });
-
-      setState(() {
-        _controller = controller;
-        _cameraReady = true;
-      });
+      final picker = ImagePicker();
+      final x = await picker.pickImage(source: ImageSource.gallery, maxWidth: 1024);
+      if (x == null) return;
+      setState(() => _pickedFace = x);
     } catch (e) {
-      _snack('Không khởi tạo được camera: $e');
+      _snack('Chọn ảnh lỗi: $e');
     }
   }
 
-  Future<void> _disposeCamera() async {
+  Future<void> _takePhoto() async {
     try {
-      await _controller?.stopImageStream();
-    } catch (_) {}
-    await _controller?.dispose();
-    _controller = null;
-    _cameraReady = false;
-    _streaming = false;
-  }
-
-  Future<void> _startSampling() async {
-    if (!_cameraReady || _controller == null) {
-      await _initCamera();
-      if (!_cameraReady) return;
-    }
-    if (_isSampling) return;
-    _samples.clear();
-    _got = 0;
-    _faceOK = false;
-    _faceSnapshot = null;
-    setState(() => _isSampling = true);
-
-    if (!_streaming || !_controller!.value.isStreamingImages) {
-      await _controller!.startImageStream(_onImage);
-      setState(() => _streaming = true);
-    }
-  }
-
-  Future<void> _stopSampling() async {
-    if (_controller == null) return;
-    try {
-      await _controller!.stopImageStream();
-    } catch (_) {}
-    setState(() {
-      _streaming = false;
-      _isSampling = false;
-    });
-  }
-
-  Future<void> _onImage(CameraImage img) async {
-    final now = DateTime.now();
-    if (now.difference(_lastAt).inMilliseconds < 250) return; // debounce
-    _lastAt = now;
-    if (_busy || !_isSampling) return;
-    _busy = true;
-
-    try {
-      final emb = await FaceRuntime.instance.embeddingFromCameraImage(img);
-      if (emb != null && emb.isNotEmpty) {
-        _samples.add(emb);
-        _got = _samples.length;
-        if (kDebugMode) debugPrint('[REGISTER] sample: $_got/$_targetSamples');
-        if (mounted) setState(() {});
-        if (_got >= _targetSamples) {
-          await _stopSampling();
-          try { _faceSnapshot = await _controller?.takePicture(); } catch (_) {}
-          final mean = FaceRuntime.instance.meanEmbedding(_samples);
-          _faceOK = mean.isNotEmpty;
-          _snack(_faceOK
-              ? 'Đã thu mẫu khuôn mặt thành công ($_got ảnh).'
-              : 'Không tạo được embedding. Vui lòng thử lại.');
-          if (mounted) setState(() {});
-        }
-      } else {
-        if (kDebugMode) debugPrint('[REGISTER] no-face / bad-quality frame');
-      }
-    } catch (e, st) {
-      if (kDebugMode) {
-        debugPrint('[REGISTER] onImage error: $e');
-        debugPrint('$st');
-      }
-    } finally {
-      _busy = false;
+      final picker = ImagePicker();
+      final x = await picker.pickImage(source: ImageSource.camera, maxWidth: 1024);
+      if (x == null) return;
+      setState(() => _pickedFace = x);
+    } catch (e) {
+      _snack('Chụp ảnh lỗi: $e');
     }
   }
 
   Future<void> _register() async {
-    if (!_formKey.currentState!.validate()) return;
-    if (!_faceOK || _samples.isEmpty) {
-      _snack('Vui lòng quét đủ $_targetSamples ảnh trước khi đăng ký.');
+    // ✅ đảm bảo có Form bọc các TextFormField
+    final form = _formKey.currentState;
+    if (form == null) {
+      _snack('Form chưa được khởi tạo đúng. Hãy bấm lại.');
       return;
     }
+    if (!form.validate()) return;
+
+    // Nếu muốn bắt buộc có ảnh, giữ check này; nếu không, có thể bỏ.
+    if (_pickedFace == null) {
+      _snack('Vui lòng chọn/chụp 1 ảnh khuôn mặt trước khi đăng ký.');
+      return;
+    }
+
     setState(() => _isLoading = true);
     try {
+      // 1) Tạo tài khoản Firebase Auth
       final cred = await FirebaseAuth.instance.createUserWithEmailAndPassword(
         email: _emailCtr.text.trim(),
         password: _passwordCtr.text,
       );
       final uid = cred.user!.uid;
 
-      // 1) Tính embedding trung bình & lưu vào users/{uid}.embedding
-      final mean = FaceRuntime.instance.meanEmbedding(_samples);
-      await FaceRuntime.instance.saveEmbedding(uid, mean);
-
-      // 2) Upload ảnh đại diện lên Cloudinary -> lưu link vào users/{uid}
+      // 2) (Tuỳ chọn) Upload ảnh lên Cloudinary
       String? faceUrl;
       String? facePublicId;
-      if (_faceSnapshot != null) {
+      if (_pickedFace != null) {
         try {
           final map = await CloudinaryService()
-              .uploadFace(File(_faceSnapshot!.path), uid);
+              .uploadFace(File(_pickedFace!.path), uid);
           faceUrl = map['url'];
           facePublicId = map['publicId'];
-        } catch (_) {}
+        } catch (e) {
+          _snack('Upload ảnh thất bại (bỏ qua): $e');
+        }
       }
 
+      // 3) Lưu thông tin user (chưa có embedding)
       final roleName = _role == 2 ? 'manager' : 'employee';
       final userData = {
         'uid': uid,
@@ -223,10 +120,9 @@ class _RegisterPageState extends State<RegisterPage>
           .doc(uid)
           .set(userData, SetOptions(merge: true));
 
-      // 3) (tuỳ chọn) nạp lại index sau khi đã có user
-      await FaceRuntime.instance.refreshIndex();
-
       if (!mounted) return;
+
+      // 4) Điều hướng
       if (_role == 1) {
         Navigator.pushAndRemoveUntil(
           context,
@@ -247,15 +143,10 @@ class _RegisterPageState extends State<RegisterPage>
       else if (e.code == 'invalid-email') msg = 'Email không hợp lệ.';
       _snack(msg);
     } catch (e) {
-      _snack('Có lỗi: $e');
+      _snack('Có lỗi xảy ra: $e');
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
-  }
-
-  void _snack(String msg) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
   @override
@@ -264,200 +155,121 @@ class _RegisterPageState extends State<RegisterPage>
       body: Container(
         decoration: const BoxDecoration(
           gradient: LinearGradient(
-            colors: [Colors.white, Color(0xFF054A99)],
+            colors: [Color(0xFF2B6CB0), Color(0xFF233986)],
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
           ),
         ),
-        width: double.infinity,
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 40),
         child: SafeArea(
-          child: SingleChildScrollView(
-            child: Form(
-              key: _formKey,
-              child: Column(
-                children: [
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: IconButton(
-                      icon: const Icon(Icons.arrow_back, color: Color(0xFF233986)),
-                      onPressed: () => Navigator.pop(context),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  Image.asset('assets/logo.png', width: 180, height: 180),
-                  const SizedBox(height: 20),
-                  const Text('ĐĂNG KÝ',
+          child: Center(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+              child: Form( // ✅ BỌC FORM Ở ĐÂY
+                key: _formKey,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const SizedBox(height: 12),
+                    const Text(
+                      'Đăng ký tài khoản',
+                      textAlign: TextAlign.center,
                       style: TextStyle(
-                          fontSize: 32,
-                          fontWeight: FontWeight.w700,
-                          color: Color(0xFF233986))),
-                  const SizedBox(height: 20),
-                  TextFormField(
-                    controller: _nameCtr,
-                    style: const TextStyle(color: Color(0xFF233986), fontWeight: FontWeight.bold),
-                    decoration: _input('Họ và tên'),
-                    validator: (v) =>
-                        (v == null || v.trim().isEmpty) ? 'Nhập họ tên' : null,
-                  ),
-                  const SizedBox(height: 16),
-                  TextFormField(
-                    controller: _emailCtr,
-                    keyboardType: TextInputType.emailAddress,
-                    style: const TextStyle(color: Color(0xFF233986), fontWeight: FontWeight.bold),
-                    decoration: _input('Email'),
-                    validator: (v) {
-                      if (v == null || v.trim().isEmpty) return 'Nhập email';
-                      final ok = RegExp(r'^[^@]+@[^@]+\.[^@]+').hasMatch(v.trim());
-                      return ok ? null : 'Email không hợp lệ';
-                    },
-                  ),
-                  const SizedBox(height: 16),
-                  TextFormField(
-                    controller: _passwordCtr,
-                    obscureText: true,
-                    style: const TextStyle(color: Color(0xFF233986), fontWeight: FontWeight.bold),
-                    decoration: _input('Mật khẩu (>= 6 ký tự)'),
-                    validator: (v) =>
-                        (v != null && v.length >= 6) ? null : 'Mật khẩu tối thiểu 6 ký tự',
-                  ),
-                  const SizedBox(height: 16),
-                  TextFormField(
-                    controller: _confirmCtr,
-                    obscureText: true,
-                    style: const TextStyle(color: Color(0xFF233986), fontWeight: FontWeight.bold),
-                    decoration: _input('Xác nhận mật khẩu'),
-                    validator: (v) =>
-                        (v == _passwordCtr.text) ? null : 'Mật khẩu không khớp',
-                  ),
-                  const SizedBox(height: 16),
-                  Row(
-                    children: [
-                      const Text('Vai trò:',
-                          style: TextStyle(
-                              color: Color(0xFF233986),
-                              fontWeight: FontWeight.bold)),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: DropdownButtonFormField<int>(
-                          value: _role,
-                          items: const [
-                            DropdownMenuItem(
-                                value: 1, child: Text('Nhân viên (Employee)')),
-                            DropdownMenuItem(
-                                value: 2, child: Text('Quản lý (Manager)')),
-                          ],
-                          onChanged: (v) => setState(() => _role = v ?? 1),
-                        ),
+                        fontSize: 22,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
                       ),
-                    ],
-                  ),
-                  const SizedBox(height: 20),
-                  if (_cameraReady && _controller != null)
-                    Builder(builder: (context) {
-                      final isPortrait =
-                          MediaQuery.of(context).orientation == Orientation.portrait;
-                      final camAR = _controller!.value.aspectRatio;
-                      final ar = isPortrait ? (1 / camAR) : camAR;
-                      return AspectRatio(
-                        aspectRatio: ar,
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(12),
-                          child: CameraPreview(_controller!),
-                        ),
-                      );
-                    })
-                  else
-                    Container(
-                      height: 200,
-                      decoration: BoxDecoration(
-                          color: Colors.white.withOpacity(0.2),
-                          borderRadius: BorderRadius.circular(12)),
-                      alignment: Alignment.center,
-                      child: const Text('Chưa bật camera',
-                          style: TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.bold)),
                     ),
-                  const SizedBox(height: 10),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: OutlinedButton.icon(
-                          icon: const Icon(Icons.video_call),
-                          onPressed: _cameraReady ? null : _initCamera,
-                          label: const Text('Bật camera'),
+                    const SizedBox(height: 16),
+                    _text('Họ tên', _nameCtr),
+                    const SizedBox(height: 10),
+                    _text('Email', _emailCtr, keyboard: TextInputType.emailAddress),
+                    const SizedBox(height: 10),
+                    _text('Mật khẩu', _passwordCtr, obscure: true),
+                    const SizedBox(height: 10),
+                    _text('Xác nhận mật khẩu', _confirmCtr, obscure: true),
+                    const SizedBox(height: 10),
+                    _rolePicker(),
+                    const SizedBox(height: 16),
+
+                    // Ảnh xem trước
+                    AspectRatio(
+                      aspectRatio: 3 / 4,
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: Colors.black,
+                          borderRadius: BorderRadius.circular(12),
                         ),
+                        clipBehavior: Clip.antiAlias,
+                        child: _pickedFace == null
+                            ? const Center(
+                                child: Text('Chưa có ảnh',
+                                    style: TextStyle(color: Colors.white70)))
+                            : Image.file(File(_pickedFace!.path), fit: BoxFit.cover),
                       ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: OutlinedButton.icon(
-                          icon: const Icon(Icons.face_retouching_natural),
-                          onPressed: (!_isSampling && !_faceOK) ? () async {
-                            if (!_cameraReady) {
-                              await _initCamera();
-                              if (!_cameraReady) return;
-                            }
-                            await _startSampling();
-                          } : null,
-                          label: Text('Quét khuôn mặt ($_targetSamples ảnh)'),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  if (_isSampling || _got > 0)
-                    Column(children: [
-                      LinearProgressIndicator(
-                        value: (_got / _targetSamples).clamp(0.0, 1.0),
-                        minHeight: 8,
-                      ),
-                      const SizedBox(height: 6),
-                      Text('Đã lấy: $_got / $_targetSamples',
-                          style: const TextStyle(
-                              color: Colors.white, fontWeight: FontWeight.bold)),
-                    ]),
-                  if (_faceOK) ...[
+                    ),
                     const SizedBox(height: 8),
-                    const Text('✅ Khuôn mặt đã sẵn sàng',
-                        style: TextStyle(
-                            color: Colors.white, fontWeight: FontWeight.bold)),
-                  ],
-                  const SizedBox(height: 24),
-                  SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton(
+                    const Text(
+                      'Chọn hoặc chụp 1 ảnh khuôn mặt rõ, đủ sáng.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    const SizedBox(height: 8),
+
+                    // Nút chọn/chụp ảnh
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: _pickFromGallery,
+                            icon: const Icon(Icons.photo_library),
+                            label: const Text('Chọn ảnh'),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            onPressed: _takePhoto,
+                            icon: const Icon(Icons.camera_alt),
+                            label: const Text('Chụp ảnh'),
+                          ),
+                        ),
+                      ],
+                    ),
+
+                    const SizedBox(height: 16),
+                    ElevatedButton(
                       onPressed: _isLoading ? null : _register,
                       style: ElevatedButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(vertical: 14),
-                          backgroundColor: Colors.white,
-                          shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(20))),
+                        backgroundColor: const Color(0xFF48BB78),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
                       child: _isLoading
                           ? const SizedBox(
-                              height: 20,
-                              width: 20,
-                              child: CircularProgressIndicator(strokeWidth: 2))
-                          : const Text('TẠO TÀI KHOẢN',
+                              width: 22, height: 22,
+                              child: CircularProgressIndicator(
+                                  strokeWidth: 2, color: Colors.white))
+                          : const Text('Đăng ký',
                               style: TextStyle(
-                                  color: Color(0xFF233986),
-                                  fontWeight: FontWeight.bold,
-                                  letterSpacing: 1))),
-                  ),
-                  
-                  const SizedBox(height: 12),
-                  TextButton(
-                    onPressed: () => Navigator.pop(context),
-                    child: const Text(
-                      'Đã có tài khoản? Đăng nhập',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.bold,
-                        decoration: TextDecoration.underline,
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.bold)),
+                    ),
+                    const SizedBox(height: 12),
+                    TextButton(
+                      onPressed: () => Navigator.pop(context),
+                      child: const Text(
+                        'Đã có tài khoản? Đăng nhập',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          decoration: TextDecoration.underline,
+                        ),
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
@@ -466,18 +278,44 @@ class _RegisterPageState extends State<RegisterPage>
     );
   }
 
-  InputDecoration _input(String label) => InputDecoration(
+  Widget _rolePicker() {
+    return DropdownButtonFormField<int>(
+      value: _role,
+      items: const [
+        DropdownMenuItem(value: 1, child: Text('Nhân viên')),
+        DropdownMenuItem(value: 2, child: Text('Quản lý')),
+      ],
+      onChanged: (v) => setState(() => _role = v ?? 1),
+      decoration: InputDecoration(
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+        filled: true,
+        fillColor: Colors.white,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      ),
+    );
+  }
+
+  Widget _text(String label, TextEditingController ctr,
+      {bool obscure = false, TextInputType? keyboard}) {
+    return TextFormField(
+      controller: ctr,
+      obscureText: obscure,
+      keyboardType: keyboard,
+      validator: (v) {
+        if ((v ?? '').trim().isEmpty) return 'Vui lòng nhập $label';
+        if (label == 'Xác nhận mật khẩu' &&
+            _confirmCtr.text != _passwordCtr.text) {
+          return 'Mật khẩu xác nhận không khớp';
+        }
+        return null;
+      },
+      decoration: InputDecoration(
         labelText: label,
         border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
         labelStyle: const TextStyle(color: Color(0xFF233986)),
         filled: true,
         fillColor: Colors.white,
-      );
-
-  InputDecoration _dropdownDecoration() => InputDecoration(
-        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-        filled: true,
-        fillColor: Colors.white,
-        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-      );
+      ),
+    );
+  }
 }

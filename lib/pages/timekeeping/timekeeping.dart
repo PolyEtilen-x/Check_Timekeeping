@@ -19,22 +19,14 @@ class TimeKeepingPage extends StatefulWidget {
 class _TimeKeepingPageState extends State<TimeKeepingPage>
     with WidgetsBindingObserver {
   CameraController? _controller;
-  Future<void>? _initFuture;
-  
-
-  // UI state
-  String _status = 'idle';
-  String? _name;
-  String? _role;
-  DateTime? _timeIn;
-
-  // Debug / metrics
   bool _streaming = false;
-  int _frames = 0;
-  DateTime? _lastFrameAt;
-
-  // Pipeline control
   bool _isProcessing = false;
+  int _frames = 0;
+  String _status = 'idle';
+  String? _matchName;
+  int? _role; // 1 employee, 2 manager
+  DateTime? _timeIn;
+  DateTime? _lastFrameAt;
 
   // Watchdog
   Timer? _wd;
@@ -90,6 +82,10 @@ class _TimeKeepingPageState extends State<TimeKeepingPage>
     setState(() => _status = 'loading-face-runtime');
     try {
       await FaceRuntime.instance.init();
+      // Refresh index to pick up any new enrollments
+      try {
+        await FaceRuntime.instance.refreshIndex();
+      } catch (_) {}
     } catch (e, st) {
       if (kDebugMode) {
         debugPrint('[TK] FaceRuntime init error: $e');
@@ -114,65 +110,31 @@ class _TimeKeepingPageState extends State<TimeKeepingPage>
       (c) => c.lensDirection == CameraLensDirection.front,
       orElse: () => cams.first,
     );
-
-    final ctrl = CameraController(
+    final controller = CameraController(
       front,
       ResolutionPreset.medium,
       enableAudio: false,
       imageFormatGroup: ImageFormatGroup.yuv420,
     );
-
-    _controller = ctrl;
-    _initFuture = ctrl.initialize();
-
-    FaceRuntime.instance.updateRotation(
-      ctrl.description,
-      ctrl.value.deviceOrientation,
-    );
-    // reset rotation khi xoay thiết bị
-    ctrl.addListener(() {
-      final ori = _controller?.value.deviceOrientation;
-      if (ori != null) {
-        FaceRuntime.instance.updateRotation(_controller!.description, ori);
-      }
+    await controller.initialize();
+    setState(() {
+      _controller = controller;
+      _status = 'camera-ready';
     });
-
-    try {
-      await _initFuture;
-      if (!mounted) return;
-      setState(() => _status = 'initialized');
-    } catch (e, st) {
-      if (kDebugMode) {
-        debugPrint('[TK] init camera error: $e');
-        debugPrint('$st');
-      }
-      setState(() => _status = 'init-error');
-    }
   }
-
 
   Future<void> _disposeCamera() async {
     try {
       await _controller?.dispose();
     } catch (_) {}
     _controller = null;
-    _initFuture = null;
-    if (mounted) setState(() {});
   }
 
   Future<void> _startStream() async {
-    if (_controller == null) return;
-
-    // Chờ init xong
-    if (_initFuture != null) {
-      try {
-        await _initFuture;
-      } catch (_) {
-        return;
-      }
+    if (_controller == null) {
+      await _initCamera();
+      if (_controller == null) return;
     }
-    if (!mounted) return;
-    if (!_controller!.value.isInitialized) return;
     if (_controller!.value.isStreamingImages) {
       _streaming = true;
       if (mounted) setState(() => _status = 'streaming');
@@ -204,14 +166,10 @@ class _TimeKeepingPageState extends State<TimeKeepingPage>
             if (mounted) setState(() => _status = 'profile-not-found');
             return;
           }
-          if (!profile.isActive) {
-            if (mounted) setState(() => _status = 'inactive-user');
-            return;
-          }
 
-          // 3) GHI CHẤM CÔNG
-          _name = profile.name;
-          _role = profile.role;
+          // 3) GHI CÔNG
+          _matchName = profile.name;
+          _role = profile.role as int?;
           _timeIn = DateTime.now();
           if (mounted) setState(() => _status = 'saving');
 
@@ -223,6 +181,9 @@ class _TimeKeepingPageState extends State<TimeKeepingPage>
             clientAt: _timeIn!,
           );
           if (kDebugMode) debugPrint('[TK] attendance saved: $docId');
+
+          try { await _stopStream(); } catch (_) {}
+
           if (mounted) setState(() => _status = 'saved');
         } catch (e, st) {
           if (kDebugMode) {
@@ -242,12 +203,7 @@ class _TimeKeepingPageState extends State<TimeKeepingPage>
         debugPrint('[TK] startImageStream error: $e');
         debugPrint('$st');
       }
-      if (mounted) {
-        setState(() {
-          _streaming = false;
-          _status = 'stream-error';
-        });
-      }
+      if (mounted) setState(() => _status = 'stream-error');
     }
   }
 
@@ -287,67 +243,121 @@ class _TimeKeepingPageState extends State<TimeKeepingPage>
 
   @override
   Widget build(BuildContext context) {
-    final preview = _controller?.value.isInitialized == true
-        ? CameraPreview(_controller!)
-        : const Center(
-            child: Text('Đang khởi tạo camera...',
-                style: TextStyle(color: Colors.white70)));
-
     return Scaffold(
-      backgroundColor: Colors.black,
-      appBar: AppBar(
-        title: const Text('Chấm công bằng khuôn mặt (Firebase)'),
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            colors: [Color(0xFF2B6CB0), Color(0xFF233986)],
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+          ),
+        ),
+        child: SafeArea(
+          child: Column(
+            children: [
+              const SizedBox(height: 6),
+              _header(),
+              const SizedBox(height: 8),
+              Expanded(child: _cameraView()),
+              _panel(),
+            ],
+          ),
+        ),
       ),
-      body: Stack(
+    );
+  }
+
+  Widget _header() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Row(
         children: [
-          Positioned.fill(child: preview),
-          Positioned(
-            left: 12,
-            top: 12,
-            child: _StatusChip(
-              status: _status,
-              frames: _frames,
-              streaming: _streaming,
-              lastFrameAt: _lastFrameAt,
+          Expanded(
+            child: Text(
+              'Chấm công',
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+                fontSize: 18,
+              ),
             ),
           ),
-          Positioned(
-            left: 12,
-            bottom: 12,
-            right: 12,
-            child: _BottomPanel(
-              name: _name,
-              role: _role,
-              timeIn: _timeIn,
-              onStart: () async {
-                await _startStream();
-              },
-              onStop: () async {
-                await _stopStream();
-              },
-              onRestart: () async {
-                await _stopStream();
-                await _startStream();
-              },
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(
+              color: Colors.white24,
+              borderRadius: BorderRadius.circular(16),
             ),
-          ),
+            child: Text(
+              _status,
+              style: const TextStyle(color: Colors.white),
+            ),
+          )
         ],
       ),
     );
   }
+
+  Widget _cameraView() {
+    return AspectRatio(
+      aspectRatio: 3 / 4,
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 12),
+        decoration: BoxDecoration(
+          color: Colors.black,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: _controller != null
+            ? CameraPreview(_controller!)
+            : const Center(
+                child: Text('Camera chưa sẵn sàng',
+                    style: TextStyle(color: Colors.white70))),
+      ),
+    );
+  }
+
+  Widget _panel() {
+    return _Panel(
+      status: _status,
+      frames: _frames,
+      streaming: _streaming,
+      lastFrameAt: _lastFrameAt,
+      matchName: _matchName,
+      role: _role,
+      onStart: _startStream,
+      onStop: _stopStream,
+      onRestart: () async {
+        await _stopStream();
+        await _disposeCamera();
+        await _initCamera();
+        await _startStream();
+      },
+    );
+  }
 }
 
-class _StatusChip extends StatelessWidget {
+class _Panel extends StatelessWidget {
   final String status;
   final int frames;
   final bool streaming;
   final DateTime? lastFrameAt;
+  final String? matchName;
+  final int? role;
+  final VoidCallback onStart;
+  final VoidCallback onStop;
+  final Future<void> Function() onRestart;
 
-  const _StatusChip({
+  const _Panel({
     required this.status,
     required this.frames,
     required this.streaming,
     required this.lastFrameAt,
+    required this.matchName,
+    required this.role,
+    required this.onStart,
+    required this.onStop,
+    required this.onRestart,
   });
 
   @override
@@ -361,99 +371,72 @@ class _StatusChip extends StatelessWidget {
 
     return Container(
       margin: const EdgeInsets.only(top: 8, left: 8),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
-        color: Colors.black.withOpacity(0.6),
-        borderRadius: BorderRadius.circular(20),
+        color: Colors.white,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.15),
+            blurRadius: 8,
+            offset: const Offset(0, -2),
+          )
+        ],
       ),
-      child: Text(
-        extra.isEmpty ? status : '$status · $extra',
-        style: const TextStyle(color: Colors.white, fontSize: 12),
-      ),
-    );
-  }
-}
-
-class _BottomPanel extends StatelessWidget {
-  final String? name;
-  final String? role;
-  final DateTime? timeIn;
-  final VoidCallback onStart;
-  final VoidCallback onStop;
-  final VoidCallback onRestart;
-
-  const _BottomPanel({
-    required this.name,
-    required this.role,
-    required this.timeIn,
-    required this.onStart,
-    required this.onStop,
-    required this.onRestart,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hasRec = name != null && role != null && timeIn != null;
-
-    return Align(
-      alignment: Alignment.bottomCenter,
-      child: Container(
-        margin: const EdgeInsets.all(12),
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: Colors.black.withOpacity(0.55),
-          borderRadius: BorderRadius.circular(20),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            hasRec
-                ? Text(
-                    '$name ($role)\n${timeIn!.toLocal().toIso8601String().replaceFirst("T", " ").split(".").first}',
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 15,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  )
-                : const Text(
-                    'Chưa nhận diện',
-                    style: TextStyle(color: Colors.white70, fontSize: 14),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              Expanded(
+                  child: Text('Trạng thái: $status · $extra',
+                      style: const TextStyle(fontWeight: FontWeight.w600))),
+              if (matchName != null)
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: Colors.green.shade100,
+                    borderRadius: BorderRadius.circular(16),
                   ),
-            const SizedBox(height: 12),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
-                ElevatedButton(
-                  onPressed: onStart,
-                  style: ElevatedButton.styleFrom(
-                    shape: const CircleBorder(),
-                    padding: const EdgeInsets.all(14),
+                  child: Text(
+                    '$matchName${role == null ? '' : role == 2 ? ' (QL)' : ' (NV)'}',
+                    style: const TextStyle(fontWeight: FontWeight.bold),
                   ),
-                  child: const Icon(Icons.play_arrow),
                 ),
-                OutlinedButton(
-                  onPressed: onStop,
-                  style: OutlinedButton.styleFrom(
-                    shape: const CircleBorder(),
-                    padding: const EdgeInsets.all(14),
-                  ),
-                  child: const Icon(Icons.stop),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: [
+              ElevatedButton(
+                onPressed: onStart,
+                style: ElevatedButton.styleFrom(
+                  shape: const CircleBorder(),
+                  padding: const EdgeInsets.all(14),
                 ),
-                ElevatedButton(
-                  onPressed: onRestart,
-                  style: ElevatedButton.styleFrom(
-                    shape: const CircleBorder(),
-                    padding: const EdgeInsets.all(14),
-                    backgroundColor: Colors.blueGrey,
-                  ),
-                  child: const Icon(Icons.restart_alt),
+                child: const Icon(Icons.play_arrow),
+              ),
+              OutlinedButton(
+                onPressed: onStop,
+                style: OutlinedButton.styleFrom(
+                  shape: const CircleBorder(),
+                  padding: const EdgeInsets.all(14),
                 ),
-              ],
-            )
-          ],
-        ),
+                child: const Icon(Icons.stop),
+              ),
+              ElevatedButton(
+                onPressed: onRestart,
+                style: ElevatedButton.styleFrom(
+                  shape: const CircleBorder(),
+                  padding: const EdgeInsets.all(14),
+                  backgroundColor: Colors.blueGrey,
+                ),
+                child: const Icon(Icons.restart_alt),
+              ),
+            ],
+          )
+        ],
       ),
     );
   }

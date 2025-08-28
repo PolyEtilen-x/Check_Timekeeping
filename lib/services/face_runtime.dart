@@ -50,7 +50,7 @@ class FaceRuntime {
     // ❗ Không đọc Firestore ở đây để tránh permission-denied khi chưa đăng nhập
     _inited = true;
   }
-
+  
   Future<String?> recognizeUid(CameraImage image) async {
     if (!_inited) await init();
 
